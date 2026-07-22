@@ -11,9 +11,15 @@ dist/
 *~
 
 # ingest state / creds (repo-only tooling; NEVER commit)
+# NOTE: bare names match at ANY depth (repo ROOT *and* tools/); the **/ and /.env
+# forms are explicit belt-and-suspenders so root-level creds can never leak.
 .env
+/.env
+**/.env
 withings_targets.json
+**/withings_targets.json
 withings_tokens.json
+**/withings_tokens.json
 withings_checkpoint.json
 withings_dedup_store.json
 withings_sync.lock
