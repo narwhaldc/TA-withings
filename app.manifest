@@ -1,0 +1,55 @@
+{
+  "schemaVersion": "2.0.0",
+  "info": {
+    "title": "Withings Add-on (Wearables)",
+    "id": {
+      "group": null,
+      "name": "TA-withings",
+      "version": "0.1.0"
+    },
+    "author": [
+      {
+        "name": "Tony Vincent",
+        "email": null,
+        "company": null
+      }
+    ],
+    "releaseDate": null,
+    "description": "Withings technology add-on: normalizes Withings body-composition data (weight, BMI, body fat %) into the canonical Wearables data model. Source & docs: https://github.com/narwhaldc",
+    "classification": {
+      "intendedAudience": null,
+      "categories": [],
+      "developmentStatus": null
+    },
+    "commonInformationModels": null,
+    "license": {
+      "name": "Apache-2.0",
+      "text": "LICENSE",
+      "uri": null
+    },
+    "privacyPolicy": {
+      "name": null,
+      "text": null,
+      "uri": null
+    },
+    "releaseNotes": {
+      "name": null,
+      "text": "./README.md",
+      "uri": null
+    }
+  },
+  "dependencies": null,
+  "tasks": null,
+  "inputGroups": null,
+  "incompatibleApps": null,
+  "platformRequirements": null,
+  "supportedDeployments": [
+    "_standalone",
+    "_distributed",
+    "_search_head_clustering"
+  ],
+  "targetWorkloads": [
+    "_search_heads",
+    "_indexers"
+  ]
+}

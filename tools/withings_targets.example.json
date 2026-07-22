@@ -1,0 +1,11 @@
+{
+  "targets": {
+    "personal": {
+      "hec_url":    "https://splunk:8088/services/collector/event",
+      "hec_token":  "YOUR-HEC-TOKEN",
+      "index":      "wearables",
+      "person_id":  "P001",
+      "verify_ssl": false
+    }
+  }
+}

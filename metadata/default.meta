@@ -1,0 +1,18 @@
+## TA-withings metadata. Write is admin/sc_admin only (self-managed + Cloud).
+## The shared person/device lookups live in the `wearables` app (exported
+## global); this add-on's props reference them by name and resolve them globally.
+
+[]
+access = read : [ * ], write : [ admin, sc_admin ]
+export = system
+
+## Normalization objects exported so the wearables app + dashboards inherit the
+## canonical fields + dataset tags.
+[props]
+export = system
+
+[eventtypes]
+export = system
+
+[tags]
+export = system

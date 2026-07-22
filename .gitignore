@@ -1,0 +1,20 @@
+*.spl
+.DS_Store
+__pycache__/
+stage/
+dist/
+
+# editor swap/temp files (can contain secrets — never commit)
+*.swp
+*.swo
+.*.sw?
+*~
+
+# ingest state / creds (repo-only tooling; NEVER commit)
+.env
+withings_targets.json
+withings_tokens.json
+withings_checkpoint.json
+withings_dedup_store.json
+withings_sync.lock
+*.tmp
