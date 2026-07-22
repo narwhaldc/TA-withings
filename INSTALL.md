@@ -30,7 +30,11 @@ Withings scale → Withings Cloud (Measure/Getmeas API)
   > developers and partners" = the EU **Public API**, no contract — works for your personal
   > account regardless of where you live). Do **NOT** pick **US Cloud**: that's the contract-only
   > **Medical Cloud** and demands a signed-agreement declaration. Both expose the identical
-  > `wbsapi.withings.net` Public API this fetcher uses.
+  > `wbsapi.withings.net` Public API this fetcher uses. Use the **Development** target
+  > environment and register `http://localhost:8899/callback` — Withings warns that
+  > localhost/http/non-443 callbacks cap the app at **10 users** and can't go "production";
+  > that's fine for personal use (you're one user). Ignore the URL **"Test"** button (nothing
+  > listens on 8899 until `--auth` runs).
 
 ## 1. Install the Splunk apps
 Install + restart Splunk: **`TA-withings`** (this add-on) and **`wearables`** (model + dashboards).
