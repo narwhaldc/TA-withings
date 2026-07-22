@@ -58,10 +58,11 @@ MEASTYPES = ",".join(str(t) for t in sorted(TYPE_MAP))
 
 
 # ---------------------------------------------------------------- small helpers
-def load_dotenv(path=os.path.join(HERE, ".env")):
-    """Populate os.environ from a local .env (KEY=VALUE lines) if present.
-    Existing environment values win; 'export ' prefix and surrounding quotes are
-    stripped. .env is gitignored (holds credentials) — never commit it."""
+def load_dotenv():
+    """Populate os.environ from a local .env (KEY=VALUE lines) next to this script,
+    if present. Existing environment values win; a leading 'export ' and surrounding
+    quotes are stripped. .env is gitignored (it holds credentials) — never commit it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
     try:
         with open(path) as f:
             for line in f:
@@ -73,12 +74,14 @@ def load_dotenv(path=os.path.join(HERE, ".env")):
                 if "=" not in line:
                     continue
                 key, _, val = line.partition("=")
-                key = key.strip()
-                val = val.strip().strip('"').strip("'")
+                key, val = key.strip(), val.strip().strip('"').strip("'")
                 if key and key not in os.environ:
                     os.environ[key] = val
     except IOError:
         pass
+
+
+load_dotenv()  # pick up creds/config from .env next to this script (gitignored)
 
 
 def load_json(path, default):
@@ -341,7 +344,6 @@ def main():
     ap.add_argument("--reset-dedup", action="store_true", help="clear dedup (all, or one --target)")
     ap.add_argument("--target", metavar="NAME", help="limit to a single named target")
     args = ap.parse_args()
-    load_dotenv()  # pick up WITHINGS_CLIENT_ID/SECRET etc. from tools/.env if present
 
     if args.auth:
         do_auth()
