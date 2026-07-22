@@ -26,6 +26,11 @@ Withings scale → Withings Cloud (Measure/Getmeas API)
 - Python 3.9+ on the ingest host (`pip install requests`).
 - A **Withings developer app** (client id/secret from developer.withings.com) with an
   OAuth2 redirect URI matching `WITHINGS_REDIRECT_URI` (default `http://localhost:8899/callback`).
+  > **Pick the right cloud:** on the developer dashboard choose **Europe Cloud** ("for all
+  > developers and partners" = the EU **Public API**, no contract — works for your personal
+  > account regardless of where you live). Do **NOT** pick **US Cloud**: that's the contract-only
+  > **Medical Cloud** and demands a signed-agreement declaration. Both expose the identical
+  > `wbsapi.withings.net` Public API this fetcher uses.
 
 ## 1. Install the Splunk apps
 Install + restart Splunk: **`TA-withings`** (this add-on) and **`wearables`** (model + dashboards).
