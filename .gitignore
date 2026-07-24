@@ -23,4 +23,5 @@ withings_tokens.json
 withings_checkpoint.json
 withings_dedup_store.json
 withings_sync.lock
+*.lock
 *.tmp

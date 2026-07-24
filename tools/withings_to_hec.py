@@ -20,9 +20,11 @@ Then configure withings_targets.json (see withings_targets.example.json) and run
 """
 
 import argparse
+import atexit
 import datetime
 import fcntl
 import http.server
+import signal
 import json
 import os
 import sys
@@ -349,16 +351,35 @@ def main():
         do_auth()
         return
 
+    # exclusive lock: flock auto-releases on exit/crash; we also remove the lock
+    # FILE on clean exit (atexit + SIGTERM/SIGINT) so no stale file lingers.
+    # Registered only AFTER we hold the lock, so a losing instance can't delete it.
     lock = open(LOCK_FILE, "w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
         sys.exit("another withings_to_hec.py run holds the lock; exiting.")
-    try:
-        run_sync(args)
-    finally:
-        fcntl.flock(lock, fcntl.LOCK_UN)
-        lock.close()
+    lock.write(str(os.getpid()))
+    lock.flush()
+
+    def _release_lock():
+        try:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            lock.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(LOCK_FILE)
+        except OSError:
+            pass
+    atexit.register(_release_lock)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
+
+    run_sync(args)
 
 
 if __name__ == "__main__":
