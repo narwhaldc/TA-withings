@@ -84,6 +84,10 @@ env vars.)
 > + `widx`).
 
 ## 5. Populate the registries (admin, KV Store in the wearables app)
+In the **wearables** app, open **Admin → People & Defaults** and add the person (person_id,
+display name, default units, goals/height, and optionally the mapped Splunk login). Blank fields
+keep existing values; the page is admin-only (writes are admin/sc_admin-locked). Equivalent raw
+SPL if you prefer:
 ```
 | makeresults | eval person_id="P001", person_name="Tony", step_goal=10000
 | table person_id person_name step_goal | outputlookup wearable_person_profile
