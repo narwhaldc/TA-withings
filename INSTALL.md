@@ -40,11 +40,13 @@ Withings scale → Withings Cloud (Measure/Getmeas API)
 Install + restart Splunk: **`TA-withings`** (this add-on) and **`wearables`** (model + dashboards).
 
 ## 2. Install the fetcher + deps
-The poller is repo-only ingest tooling — **not** in the `.spl`. Copy `tools/withings_to_hec.py`
-to your ingest host:
+The poller is repo-only ingest tooling — **not** in the `.spl` (keeps the app Splunk-Cloud
+vetted). Get it onto your ingest host with a one-liner (no git required — just `curl`):
 ```bash
+curl -O https://raw.githubusercontent.com/narwhaldc/TA-withings/main/tools/withings_to_hec.py
 python3 -m pip install requests
 ```
+(Or copy it from a checkout / `wget` the same URL.)
 
 ## 3. Withings OAuth2 authorization (one-time)
 ```bash
