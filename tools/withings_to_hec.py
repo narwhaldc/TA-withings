@@ -55,6 +55,7 @@ TYPE_MAP = {
     9: "diastolic_bp", 10: "systolic_bp", 11: "heart_pulse", 12: "temperature",
     54: "spo2", 71: "body_temp", 73: "skin_temp", 76: "muscle_mass",
     77: "hydration", 88: "bone_mass", 91: "pulse_wave_velocity", 123: "vo2max",
+    170: "visceral_fat",
 }
 MEASTYPES = ",".join(str(t) for t in sorted(TYPE_MAP))
 
