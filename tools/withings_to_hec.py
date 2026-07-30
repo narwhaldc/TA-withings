@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """
-withings_to_hec.py — pull Withings body-composition measurements into Splunk HEC.
+withings_to_hec.py — pull Withings data into Splunk HEC.
 
 Mirrors the Oura fetcher's conventions (OAuth2 pull, multi-target fan-out,
-per-record dedup, checkpoint, fcntl lock). Sends one flattened event per Withings
-measurement group to index=wearables, sourcetype=withings:body, with indexed
-fields vendor="withings" + person_id. TA-withings normalizes those at search time.
+per-record dedup, checkpoint, fcntl lock). Sends one flattened event per record
+to index=wearables with indexed fields vendor="withings" + person_id; TA-withings
+normalizes at search time. Four datasets / sourcetypes:
+    withings:body      — body composition (getmeas)          [scope user.metrics]
+    withings:activity  — daily activity summary (getactivity) [scope user.activity]
+    withings:workouts  — workout sessions (getworkouts)       [scope user.activity]
+    withings:sleep     — nightly sleep summary (getsummary)   [scope user.activity]
+NOTE: adding the activity/sleep/workout datasets widened the OAuth SCOPE to
+include user.activity — existing installs must re-run --auth once to grant it.
 
 REPO-ONLY TOOLING — never shipped in the .spl (it holds credentials).
 
@@ -38,7 +44,11 @@ WBS = "https://wbsapi.withings.net"
 AUTHORIZE_URL = "https://account.withings.com/oauth2_user/authorize2"
 TOKEN_URL = WBS + "/v2/oauth2"
 MEASURE_URL = WBS + "/measure"
-SCOPE = "user.metrics"
+MEASURE_V2_URL = WBS + "/v2/measure"
+SLEEP_URL = WBS + "/v2/sleep"
+# body measurements are user.metrics; activity / sleep / workouts need user.activity.
+# Adding user.activity to an existing grant requires a one-time re-auth (--auth).
+SCOPE = "user.metrics,user.activity"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.getenv("WITHINGS_TOKEN_FILE", os.path.join(HERE, "withings_tokens.json"))
@@ -58,6 +68,31 @@ TYPE_MAP = {
     170: "visceral_fat",
 }
 MEASTYPES = ",".join(str(t) for t in sorted(TYPE_MAP))
+
+# ---- Part B: activity / sleep / workout endpoints (require user.activity scope) ----
+ACTIVITY_FIELDS = ("steps,distance,elevation,soft,moderate,intense,active,calories,"
+                   "totalcalories,hr_average,hr_min,hr_max,hr_zone_0,hr_zone_1,hr_zone_2,hr_zone_3")
+WORKOUT_FIELDS = ("calories,intensity,manual_distance,manual_calories,hr_average,hr_min,hr_max,"
+                  "hr_zone_0,hr_zone_1,hr_zone_2,hr_zone_3,steps,distance,elevation,pool_length,pool_laps")
+SLEEP_FIELDS = ("total_sleep_time,total_timeinbed,sleep_score,asleepduration,deepsleepduration,"
+                "lightsleepduration,remsleepduration,wakeupduration,durationtosleep,durationtowakeup,"
+                "wakeupcount,hr_average,hr_min,hr_max,rr_average,rr_min,rr_max,"
+                "breathing_disturbances_intensity,snoring,snoringepisodecount,sleep_efficiency,"
+                "sleep_latency,apnea_hypopnea_index,nb_rem_episodes,out_of_bed_count")
+
+# Withings numeric workout category -> label. Labels feed the wearables activity
+# taxonomy lookup (case-insensitive) -> workout_activity_canon; unknown -> "Other".
+WORKOUT_CATEGORY = {
+    1: "Walking", 2: "Running", 3: "Hiking", 4: "Skating", 6: "Cycling", 7: "Swimming",
+    8: "Surfing", 10: "Windsurfing", 12: "Tennis", 13: "Table tennis", 14: "Squash",
+    15: "Badminton", 16: "Strength training", 17: "Calisthenics", 18: "Elliptical",
+    19: "Pilates", 20: "Basketball", 21: "Soccer", 22: "Football", 23: "Rugby",
+    24: "Volleyball", 26: "Horse riding", 27: "Golf", 28: "Yoga", 29: "Dancing",
+    30: "Boxing", 31: "Fencing", 32: "Wrestling", 33: "Martial arts", 34: "Skiing",
+    35: "Snowboarding", 36: "Other", 187: "Rowing", 188: "Zumba", 191: "Baseball",
+    192: "Handball", 193: "Hockey", 194: "Ice hockey", 195: "Climbing",
+    196: "Ice skating", 272: "Multi-sport", 306: "Walking", 307: "Meditation",
+}
 
 
 # ---------------------------------------------------------------- small helpers
@@ -248,11 +283,88 @@ def decode_group(grp):
     return ev
 
 
+# ----------------------------------------------- activity / sleep / workout pulls
+def _paged(url, action, extra, token, lastupdate, startymd, endymd, result_key):
+    """Generic v2 paginated pull for getactivity / getworkouts / getsummary.
+    Incremental uses lastupdate (epoch); backfill uses startdateymd/enddateymd."""
+    base = {"action": action}
+    base.update(extra)
+    if lastupdate is not None:
+        base["lastupdate"] = int(lastupdate)
+    else:
+        base["startdateymd"] = startymd
+        base["enddateymd"] = endymd
+    out, offset = [], 0
+    while True:
+        data = dict(base)
+        data["offset"] = offset
+        body = wbs_call(url, data, bearer=token)
+        out.extend(body.get(result_key, []))
+        if body.get("more"):
+            offset = body.get("offset", 0)
+        else:
+            break
+    return out
+
+
+def get_activity(token, lastupdate=None, startymd=None, endymd=None):
+    return _paged(MEASURE_V2_URL, "getactivity", {"data_fields": ACTIVITY_FIELDS},
+                  token, lastupdate, startymd, endymd, "activities")
+
+
+def get_workouts(token, lastupdate=None, startymd=None, endymd=None):
+    return _paged(MEASURE_V2_URL, "getworkouts", {"data_fields": WORKOUT_FIELDS},
+                  token, lastupdate, startymd, endymd, "series")
+
+
+def get_sleep(token, lastupdate=None, startymd=None, endymd=None):
+    return _paged(SLEEP_URL, "getsummary", {"data_fields": SLEEP_FIELDS},
+                  token, lastupdate, startymd, endymd, "series")
+
+
+def _ymd_epoch(ymd):
+    return int(datetime.datetime.strptime(ymd, "%Y-%m-%d")
+               .replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
+def decode_activity(a):
+    """getactivity: metric fields are top-level per day (no 'data' wrapper)."""
+    drop = {"timezone", "deviceid", "hash_deviceid", "brand", "is_tracker"}
+    ev = {k: v for k, v in a.items() if k not in drop}
+    ev["day"] = a.get("date")
+    ev["_epoch"] = _ymd_epoch(a["date"]) if a.get("date") else None
+    return ev
+
+
+def decode_workout(w):
+    """getworkouts: metrics nested under 'data'; category is a numeric type."""
+    ev = dict(w.get("data", {}))
+    cat = w.get("category")
+    ev["category"] = cat
+    ev["activity"] = WORKOUT_CATEGORY.get(cat, "Other")
+    ev["workout_id"] = w.get("id")
+    ev["startdate"] = w.get("startdate")
+    ev["enddate"] = w.get("enddate")
+    ev["day"] = w.get("date")
+    ev["_epoch"] = w.get("startdate")
+    return ev
+
+
+def decode_sleep(s):
+    """sleep getsummary: metrics nested under 'data'; one summary per night."""
+    ev = dict(s.get("data", {}))
+    ev["startdate"] = s.get("startdate")
+    ev["enddate"] = s.get("enddate")
+    ev["day"] = s.get("date")
+    ev["_epoch"] = s.get("startdate")
+    return ev
+
+
 # --------------------------------------------------------------------- HEC send
-def to_hec(target, ev):
+def to_hec(target, ev, sourcetype="withings:body"):
     e = dict(ev)
     epoch = e.pop("_epoch", None) or time.time()
-    return {"time": epoch, "sourcetype": "withings:body", "index": target["index"],
+    return {"time": epoch, "sourcetype": sourcetype, "index": target["index"],
             "event": e,
             "fields": {"vendor": "withings", "person_id": target["person_id"]}}
 
@@ -294,42 +406,60 @@ def run_sync(args):
         return
 
     token = access_token()
+    now = int(time.time())
+    today_ymd = datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d")
     if args.backfill:
         start = int(datetime.datetime.strptime(args.backfill, "%Y-%m-%d").timestamp())
-        groups = getmeas(token, startdate=start, enddate=int(time.time()))
+        groups = getmeas(token, startdate=start, enddate=now)
+        acts = get_activity(token, startymd=args.backfill, endymd=today_ymd)
+        wks = get_workouts(token, startymd=args.backfill, endymd=today_ymd)
+        slps = get_sleep(token, startymd=args.backfill, endymd=today_ymd)
     else:
         cp = load_json(CHECKPOINT_FILE, {})
         last = cp.get("lastupdate")
         if last:
             last = int(last) - OVERLAP_DAYS * 86400
         else:
-            last = int(time.time()) - 3650 * 86400  # first run: ~10y back
+            last = now - 3650 * 86400  # first run: ~10y back
         groups = getmeas(token, lastupdate=last)
+        acts = get_activity(token, lastupdate=last)
+        wks = get_workouts(token, lastupdate=last)
+        slps = get_sleep(token, lastupdate=last)
+
+    # (sourcetype, raw records, decoder, dedup-key builder). Body keeps its bare
+    # grpid key for backward-compat with existing dedup stores; new types get a
+    # prefix so keys never collide across datasets.
+    datasets = [
+        ("withings:body", groups, decode_group, lambda ev: str(ev.get("grpid"))),
+        ("withings:activity", acts, decode_activity, lambda ev: "act:" + str(ev.get("day"))),
+        ("withings:workouts", wks, decode_workout, lambda ev: "wk:" + str(ev.get("workout_id"))),
+        ("withings:sleep", slps, decode_sleep, lambda ev: "sl:" + str(ev.get("startdate"))),
+    ]
 
     dedup = load_json(DEDUP_FILE, {})
     sent_total = 0
     for name, tcfg in targets.items():
-        batch = []
-        for grp in groups:
-            ev = decode_group(grp)
-            key = str(ev["grpid"])
-            rec = dedup.setdefault(key, {"sent_to": []})
-            if name in rec["sent_to"]:
+        for sourcetype, records, decode, keyfn in datasets:
+            batch = []
+            for raw in records:
+                ev = decode(raw)
+                key = keyfn(ev)
+                rec = dedup.setdefault(key, {"sent_to": []})
+                if name in rec["sent_to"]:
+                    continue
+                batch.append((key, to_hec(tcfg, ev, sourcetype)))
+            if not batch:
                 continue
-            batch.append((key, to_hec(tcfg, ev)))
-        if not batch:
-            print("  %s: nothing new" % name)
-            continue
-        if args.dry_run:
-            print("  (dry-run) %s: %d events" % (name, len(batch)))
-            for _, e in batch[:3]:
-                print("    " + json.dumps(e["event"]))
-        else:
-            hec_send(tcfg, [e for _, e in batch])
-            for key, _ in batch:
-                dedup[key]["sent_to"].append(name)
-            print("  %s: sent %d events" % (name, len(batch)))
-        sent_total += len(batch)
+            if args.dry_run:
+                print("  (dry-run) %s [%s]: %d events" % (name, sourcetype, len(batch)))
+                for _, e in batch[:2]:
+                    print("    " + json.dumps(e["event"]))
+            else:
+                hec_send(tcfg, [e for _, e in batch])
+                for key, _ in batch:
+                    dedup[key]["sent_to"].append(name)
+                print("  %s [%s]: sent %d events" % (name, sourcetype, len(batch)))
+            sent_total += len(batch)
 
     if not args.dry_run:
         save_json(DEDUP_FILE, dedup)

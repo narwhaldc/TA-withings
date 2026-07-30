@@ -1,18 +1,18 @@
 # TA-withings → Splunk — Installation Guide
 
 Setup for the Withings data pipeline into the Wearables platform.
-**App version:** TA-withings `0.1.4` · **Ingest:** `tools/withings_to_hec.py` (Withings Measure API → HEC, OAuth2 pull)
+**App version:** TA-withings `0.1.5` · **Ingest:** `tools/withings_to_hec.py` (Withings Measure API → HEC, OAuth2 pull)
 
 ---
 
 ## Architecture
 ```
 Withings scale → Withings Cloud (Measure/Getmeas API)
-                ↓  OAuth2 (scope user.metrics; auto-refresh)
+                ↓  OAuth2 (scope user.metrics + user.activity; auto-refresh)
         tools/withings_to_hec.py             (cron; pull)
         decode value*10^unit · compute BMI · per-group dedup · checkpoint · fcntl lock
                 ↓  multi-target fan-out (withings_targets.json)
-        Splunk HEC → index=wearables, sourcetype=withings:body,
+        Splunk HEC → index=wearables, sourcetype=withings:{body,activity,workouts,sleep},
                      indexed fields vendor=withings + person_id
                 ↓
         TA-withings (search-time normalization → canonical Wearables model)
@@ -53,6 +53,10 @@ python3 -m pip install requests
 export WITHINGS_CLIENT_ID='...'         # from developer.withings.com
 export WITHINGS_CLIENT_SECRET='...'
 python3 withings_to_hec.py --auth        # opens a browser; approve access
+
+> **Upgrading from 0.1.4 or earlier?** 0.1.5 added the activity / sleep / workout
+> datasets, which need the **`user.activity`** scope. Re-run `--auth` once to grant it
+> (body-composition kept working meanwhile). Same client credentials; the crontab entry is unchanged.
 ```
 Tokens persist to `withings_tokens.json` (`WITHINGS_TOKEN_FILE`) and auto-refresh.
 > The redirect URI registered in your Withings app **must match** `WITHINGS_REDIRECT_URI`.
@@ -76,7 +80,7 @@ cp withings_targets.example.json withings_targets.json
 }
 ```
 `vendor=withings` + `person_id` are stamped as indexed HEC fields (RBAC key). Sourcetype is
-always `withings:body` — do not set a per-target sourcetype. This file holds a token →
+set by the fetcher per dataset (withings:body / :activity / :workouts / :sleep) — do not set a per-target sourcetype. This file holds a token →
 **gitignored, never commit.** (Single-target alternative: `SPLUNK_HEC_URL` + `SPLUNK_HEC_TOKEN`
 env vars.)
 
