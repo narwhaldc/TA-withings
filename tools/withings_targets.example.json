@@ -1,6 +1,6 @@
 {
   "logging": {
-    "_comment": "OPTIONAL. Mirror the fetcher's stderr logs into Splunk via HEC so the Ingest Health dashboard can show real ingest success/failure/duration. stderr is ALWAYS on regardless of this block. With method=hec the logs go to EACH target's own HEC (reusing its hec_url + hec_token) into hec_logging_index — so every Splunk you feed sees its OWN ingest health. Override the endpoint with hec_logging_url / hec_logging_token if you must. NOTE: each target's HEC token must have write access to BOTH its data index AND hec_logging_index (one token, two indexes). Provision hec_logging_index (e.g. wearables_log) once per Splunk so logs can carry a shorter retention than health data. Remove this block to log to stderr only.",
+    "_comment": "OPTIONAL. Mirror the fetcher's stderr logs into Splunk via HEC so the Ingest Health dashboard can show real ingest success/failure/duration. stderr is ALWAYS on regardless of this block. With method=hec the logs go to EACH target's own HEC (reusing its hec_url + hec_token) into hec_logging_index - so every Splunk you feed sees its OWN ingest health. Override the endpoint with hec_logging_url / hec_logging_token if you must. NOTE: each target's HEC token must have write access to BOTH its data index AND hec_logging_index (one token, two indexes). Provision hec_logging_index (e.g. wearables_log) once per Splunk so logs can carry a shorter retention than health data. Remove this block to log to stderr only.",
     "method": "hec",
     "hec_logging_index": "wearables_log"
   },
