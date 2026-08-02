@@ -40,6 +40,21 @@ import webbrowser
 
 import requests
 
+# ---- Splunk-friendly logging (logfmt: <ts> level=.. comp=.. msg=".." key=val) ----
+# Duplicated identically across the TA-* fetchers; keep them in sync.
+_LOG_COMPONENT = "withings"
+def _logfmt(v):
+    s = str(v)
+    return '"' + s.replace('"', "'") + '"' if (s == "" or " " in s or "=" in s) else s
+def _log(level, msg, **kv):
+    ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    extra = "".join(" %s=%s" % (k, _logfmt(v)) for k, v in kv.items())
+    print("%s level=%s comp=%s msg=%s%s" % (ts, level, _LOG_COMPONENT, _logfmt(msg), extra),
+          file=sys.stderr)
+def log_info(msg, **kv):  _log("INFO", msg, **kv)
+def log_warn(msg, **kv):  _log("WARN", msg, **kv)
+def log_error(msg, **kv): _log("ERROR", msg, **kv)
+
 WBS = "https://wbsapi.withings.net"
 AUTHORIZE_URL = "https://account.withings.com/oauth2_user/authorize2"
 TOKEN_URL = WBS + "/v2/oauth2"
@@ -227,7 +242,7 @@ def load_targets(target_filter=None):
     if cfg and cfg.get("targets"):
         for name, c in cfg["targets"].items():
             if not c.get("person_id"):
-                print("[warn] target '%s' has no person_id — required for RBAC" % name)
+                log_warn("target missing person_id (required for RBAC)", target=name)
             targets[name] = {
                 "hec_url": c["hec_url"], "hec_token": c["hec_token"],
                 "index": c.get("index", "wearables"), "person_id": c.get("person_id"),
@@ -388,10 +403,10 @@ def run_sync(args):
         if args.target:
             for g in dedup.values():
                 g["sent_to"] = [t for t in g.get("sent_to", []) if t != args.target]
-            print("removed target '%s' from dedup sent_to lists" % args.target)
+            log_info("removed target from dedup", target=args.target)
         else:
             dedup = {}
-            print("cleared dedup store")
+            log_info("cleared dedup store")
         save_json(DEDUP_FILE, dedup)
         return
 
@@ -406,6 +421,8 @@ def run_sync(args):
         return
 
     token = access_token()
+    t0 = time.time()
+    log_info("run started", mode=("backfill" if args.backfill else "incremental"), targets=len(targets))
     now = int(time.time())
     today_ymd = datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d")
     if args.backfill:
@@ -438,34 +455,38 @@ def run_sync(args):
 
     dedup = load_json(DEDUP_FILE, {})
     sent_total = 0
+    skipped_total = 0
     for name, tcfg in targets.items():
         for sourcetype, records, decode, keyfn in datasets:
             batch = []
+            skipped = 0
             for raw in records:
                 ev = decode(raw)
                 key = keyfn(ev)
                 rec = dedup.setdefault(key, {"sent_to": []})
                 if name in rec["sent_to"]:
+                    skipped += 1
                     continue
                 batch.append((key, to_hec(tcfg, ev, sourcetype)))
+            skipped_total += skipped
             if not batch:
                 continue
             if args.dry_run:
-                print("  (dry-run) %s [%s]: %d events" % (name, sourcetype, len(batch)))
+                log_info("dry-run batch", person_id=tcfg.get("person_id"), target=name, sourcetype=sourcetype, count=len(batch), skipped=skipped)
                 for _, e in batch[:2]:
                     print("    " + json.dumps(e["event"]))
             else:
                 hec_send(tcfg, [e for _, e in batch])
                 for key, _ in batch:
                     dedup[key]["sent_to"].append(name)
-                print("  %s [%s]: sent %d events" % (name, sourcetype, len(batch)))
+                log_info("sent events", person_id=tcfg.get("person_id"), target=name, sourcetype=sourcetype, count=len(batch), skipped=skipped)
             sent_total += len(batch)
 
     if not args.dry_run:
         save_json(DEDUP_FILE, dedup)
         save_json(CHECKPOINT_FILE, {"lastupdate": int(time.time())})
-    print("%sdone — %d events across %d target(s)."
-          % ("(dry-run) " if args.dry_run else "", sent_total, len(targets)))
+    log_info("run complete", events=sent_total, skipped=skipped_total, targets=len(targets),
+             duration_s=round(time.time() - t0, 1), dry_run=args.dry_run)
 
 
 def main():
@@ -489,7 +510,8 @@ def main():
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
-        sys.exit("another withings_to_hec.py run holds the lock; exiting.")
+        log_warn("another run holds the lock; exiting")
+        sys.exit(1)
     lock.write(str(os.getpid()))
     lock.flush()
 
@@ -510,7 +532,11 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
 
-    run_sync(args)
+    try:
+        run_sync(args)
+    except Exception as e:
+        log_error("run failed", error=type(e).__name__, detail=str(e))
+        sys.exit(1)
 
 
 if __name__ == "__main__":
