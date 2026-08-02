@@ -12,6 +12,8 @@ panels the platform already renders for other vendors — no data-model changes.
   measure arrays into named fields and sends them to Splunk HEC
   (`index=wearables`, indexed `vendor=withings` + `person_id`). **Never shipped
   in the `.spl`** — it holds credentials.
+- **Optional log mirroring:** a `logging` block in `withings_targets.json` mirrors ingest
+  logs to Splunk → the wearables **Ingest Health** dashboard. See INSTALL.md §4b.
 
 ## Architecture
 ```

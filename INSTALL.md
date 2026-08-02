@@ -23,6 +23,8 @@ Withings scale → Withings Cloud (Measure/Getmeas API)
 - **`index=wearables`** exists (Settings → Indexes / ACS).
 - **`wearables` app** installed (data model + KV registries) and **TA-withings** installed.
 - A Splunk **HEC token** with access to `index=wearables`.
+- *(Optional — for log mirroring, §4b)* a second index **`wearables_log`** for ingest logs, and
+  the **same HEC token** granted write access to it too (one token, two indexes).
 - Python 3.9+ on the ingest host (`pip install requests`).
 - A **Withings developer app** (client id/secret from developer.withings.com) with an
   OAuth2 redirect URI matching `WITHINGS_REDIRECT_URI` (default `http://localhost:8899/callback`).
@@ -88,6 +90,26 @@ env vars.)
 > index, it must match the **`widx` macro** in the dashboard apps (see their INSTALLs), so the
 > dashboards read the same index your ingest writes to. Change it in both places (target `index`
 > + `widx`).
+
+## 4b. Optional: mirror ingest logs to Splunk (Ingest Health dashboard)
+The fetcher always writes **logfmt** logs to **stderr** (`<ts> level=… comp=withings msg="…" …`) — the
+cron redirect (`>> withings_to_hec.log`, below) captures them. To also **mirror those logs into Splunk**
+so the wearables **Ingest Health** dashboard can show real success/failure/duration (not just "had
+new data"), add a top-level `logging` block to `withings_targets.json`:
+```json
+"logging": { "method": "hec", "hec_logging_index": "wearables_log" }
+```
+- With `method: "hec"`, logs go to **each target's own HEC** (reusing that target's `hec_url` +
+  `hec_token`) into `hec_logging_index`. Fan out to several Splunks → **each gets its own ingest
+  logs** (run-level lines everywhere; per-target lines only to that target's Splunk).
+- **Create a second index for the logs** — `wearables_log` — separate from the `wearables` data
+  index. Splunk retention is **per-index**, so a separate index lets you keep logs ~30 days while
+  health data stays for years.
+- **The same HEC token must have write access to BOTH indexes** — the data index (`wearables`) and
+  `hec_logging_index` (`wearables_log`). One token, two indexes.
+- stderr stays on regardless; **remove the block to log to stderr only.** Logs arrive as sourcetype
+  `wearables:ingest`. Endpoint overridable per target with `hec_logging_url` / `hec_logging_token`.
+- **Per-person RBAC on the log index:** `person_id` is stamped as an **indexed field** on each per-target log line (`sent events` / `send failed`), and on run-level lines (`run started` / `run complete`) **only when the run is a single person**. So a person-scoped `srchFilter` on `wearables_log` shows a self-manager their own ingest health (including run start/stop/duration), while multi-person aggregator runs keep run-level lines admin-only (the aggregate `events=N` total is not leaked to individuals). To scope logs by person, add `wearables_log` to the wearables role's `srchFilter` (same person_id key as the data index).
 
 ## 5. Populate the registries (admin, KV Store in the wearables app)
 In the **wearables** app, open **Admin → People & Defaults** and add the person (person_id,

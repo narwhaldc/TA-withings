@@ -41,19 +41,120 @@ import webbrowser
 import requests
 
 # ---- Splunk-friendly logging (logfmt: <ts> level=.. comp=.. msg=".." key=val) ----
-# Duplicated identically across the TA-* fetchers; keep them in sync.
+# Duplicated identically across the TA-* print-based fetchers (only _LOG_COMPONENT
+# differs); keep in sync. stderr is ALWAYS the source of truth. An optional HEC sink
+# (logging.method="hec" in the targets file) mirrors the same lines to Splunk for
+# dashboards; it is buffered and flushed at exit (via atexit, so a crash still ships
+# the ERROR), and if the flush itself fails (e.g. HEC is the thing that's down) the
+# lines are dumped to stderr and NEVER re-sent over HEC. Dry-run never flushes.
 _LOG_COMPONENT = "withings"
+
+_LOG_SINKS = []               # [{"url","token","index","verify","targets":set(),"buf":[]}]
+_LOG_STATE = {"on": False, "dry": False, "target_pids": {}, "solo_pid": None}
+
+
 def _logfmt(v):
     s = str(v)
     return '"' + s.replace('"', "'") + '"' if (s == "" or " " in s or "=" in s) else s
+
+
 def _log(level, msg, **kv):
     ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     extra = "".join(" %s=%s" % (k, _logfmt(v)) for k, v in kv.items())
-    print("%s level=%s comp=%s msg=%s%s" % (ts, level, _LOG_COMPONENT, _logfmt(msg), extra),
-          file=sys.stderr)
+    line = "%s level=%s comp=%s msg=%s%s" % (ts, level, _LOG_COMPONENT, _logfmt(msg), extra)
+    print(line, file=sys.stderr)
+    if _LOG_STATE["on"]:
+        tgt = kv.get("target")           # scoped: a targeted line goes only to that sink
+        # Indexed person_id for RBAC: explicit kwarg, else the target's person_id, else the
+        # run's solo person_id (None on multi-person runs → run-level lines stay admin-only).
+        pid = kv.get("person_id") or _LOG_STATE["target_pids"].get(tgt) or _LOG_STATE["solo_pid"]
+        for sink in _LOG_SINKS:
+            if tgt is None or tgt in sink["targets"]:
+                sink["buf"].append((time.time(), line, pid))
+
+
 def log_info(msg, **kv):  _log("INFO", msg, **kv)
 def log_warn(msg, **kv):  _log("WARN", msg, **kv)
 def log_error(msg, **kv): _log("ERROR", msg, **kv)
+
+
+def configure_hec_log(global_cfg, targets, dry_run):
+    """Set up optional per-target HEC log mirrors. `logging` config may live globally
+    (top-level `logging` block) and/or per-target (a `logging` block inside a target;
+    the target's block overrides the global). The HEC endpoint/index default to each
+    target's OWN hec_url/hec_token/index, so a single global {"method":"hec"} fans logs
+    to EVERY target's Splunk. Each mirror gets the run-level lines plus its own target's
+    sent/error lines. stderr is unaffected (always on)."""
+    _LOG_SINKS.clear()
+    _LOG_STATE["dry"] = dry_run
+    # person_id map for indexed RBAC on the log events: each target's pid, plus the
+    # run's "solo" pid (set only when the whole run is one person — see _log).
+    _LOG_STATE["target_pids"] = {tn: tc.get("person_id") for tn, tc in (targets or {}).items()}
+    _pids = sorted({p for p in _LOG_STATE["target_pids"].values() if p})
+    _LOG_STATE["solo_pid"] = _pids[0] if len(_pids) == 1 else None
+    by_key = {}
+    for tname, tcfg in (targets or {}).items():
+        merged = dict(global_cfg or {})
+        merged.update(tcfg.get("logging") or {})
+        method = merged.get("method")
+        methods = method if isinstance(method, list) else ([method] if method else [])
+        if "hec" not in [str(m).lower() for m in methods]:
+            continue
+        url = merged.get("hec_logging_url") or tcfg.get("hec_url")
+        token = merged.get("hec_logging_token") or tcfg.get("hec_token")
+        index = merged.get("hec_logging_index") or tcfg.get("index") or "wearables"
+        if not (url and token):
+            log_warn("hec log sink skipped: no hec_url/hec_token", target=tname)
+            continue
+        verify = merged.get("verify_ssl", tcfg.get("verify_ssl", True))
+        sink = by_key.get((url, token, index))
+        if sink is None:
+            sink = {"url": url, "token": token, "index": index, "verify": verify,
+                    "targets": set(), "buf": []}
+            by_key[(url, token, index)] = sink
+            _LOG_SINKS.append(sink)
+        sink["targets"].add(tname)
+    if _LOG_SINKS:
+        _LOG_STATE["on"] = True
+        atexit.register(flush_hec_log)
+        log_info("hec log sink enabled", sinks=len(_LOG_SINKS),
+                 hec_index=",".join(sorted({s["index"] for s in _LOG_SINKS})))
+
+
+def flush_hec_log():
+    """POST each sink's buffered log lines as raw logfmt events. Best-effort: a failure
+    NEVER re-sends over HEC and NEVER fails the run — it dumps to stderr. Dry-run: skip."""
+    for sink in _LOG_SINKS:
+        buf = sink["buf"]
+        sink["buf"] = []
+        if not buf or _LOG_STATE["dry"]:
+            continue
+        events = []
+        for t, line, pid in buf:
+            ev = {"time": t, "event": line, "sourcetype": "wearables:ingest", "index": sink["index"]}
+            if pid:
+                ev["fields"] = {"person_id": pid}   # indexed field → RBAC scoping on the log index
+            events.append(json.dumps(ev))
+        body = "".join(events)
+        try:
+            verify = sink["verify"] if str(sink["url"]).startswith("https") else False
+            r = requests.post(sink["url"], data=body,
+                              headers={"Authorization": "Splunk " + sink["token"]},
+                              verify=verify, timeout=30)
+            r.raise_for_status()
+        except Exception as e:
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            print('%s level=WARN comp=%s msg="hec log flush failed" error=%s target=%s count=%d'
+                  % (ts, _LOG_COMPONENT, type(e).__name__,
+                     ",".join(sorted(sink["targets"])), len(buf)), file=sys.stderr)
+
+
+def load_logging_cfg():
+    """Top-level `logging` block from the targets file (or {} if none/absent)."""
+    try:
+        return (json.loads(open(str(TARGETS_FILE)).read()) or {}).get("logging") or {}
+    except Exception:
+        return {}
 
 WBS = "https://wbsapi.withings.net"
 AUTHORIZE_URL = "https://account.withings.com/oauth2_user/authorize2"
@@ -246,7 +347,7 @@ def load_targets(target_filter=None):
             targets[name] = {
                 "hec_url": c["hec_url"], "hec_token": c["hec_token"],
                 "index": c.get("index", "wearables"), "person_id": c.get("person_id"),
-                "verify_ssl": c.get("verify_ssl", True),
+                "verify_ssl": c.get("verify_ssl", True), "logging": c.get("logging"),
             }
     elif os.getenv("SPLUNK_HEC_URL") and os.getenv("SPLUNK_HEC_TOKEN"):
         targets["default"] = {
@@ -398,6 +499,7 @@ def hec_send(target, batch):
 # -------------------------------------------------------------------- main sync
 def run_sync(args):
     targets = load_targets(args.target)
+    configure_hec_log(load_logging_cfg(), targets, args.dry_run)
     if args.reset_dedup:
         dedup = load_json(DEDUP_FILE, {})
         if args.target:
