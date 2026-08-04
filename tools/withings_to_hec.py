@@ -48,6 +48,9 @@ import requests
 # the ERROR), and if the flush itself fails (e.g. HEC is the thing that's down) the
 # lines are dumped to stderr and NEVER re-sent over HEC. Dry-run never flushes.
 _LOG_COMPONENT = "withings"
+# Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
+# emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
+FETCHER_VERSION = "1.0.0"
 
 _LOG_SINKS = []               # [{"url","token","index","verify","targets":set(),"buf":[]}]
 _LOG_STATE = {"on": False, "dry": False, "target_pids": {}, "solo_pid": None}
@@ -524,7 +527,7 @@ def run_sync(args):
 
     token = access_token()
     t0 = time.time()
-    log_info("run started", mode=("backfill" if args.backfill else "incremental"), targets=len(targets))
+    log_info("run started", fetcher_ver=FETCHER_VERSION, mode=("backfill" if args.backfill else "incremental"), targets=len(targets))
     now = int(time.time())
     today_ymd = datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d")
     if args.backfill:
