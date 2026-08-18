@@ -50,7 +50,7 @@ import requests
 _LOG_COMPONENT = "withings"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.0.0"
+FETCHER_VERSION = "1.1.0"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -190,7 +190,14 @@ TYPE_MAP = {
     77: "hydration", 88: "bone_mass", 91: "pulse_wave_velocity", 123: "vo2max",
     170: "visceral_fat",
 }
-MEASTYPES = ",".join(str(t) for t in sorted(TYPE_MAP))
+# Segmental (6-zone) composition — Withings confirmed 2026-08-18 (Haley English):
+# 173 = fat-free mass / segment, 174 = fat mass / segment, 175 = muscle mass / segment.
+# These return MULTIPLE measures per type (one per body zone), so they can't share the
+# scalar TYPE_MAP (which keeps one value per type). We REQUEST them and, until the raw
+# per-segment structure is confirmed, emit the raw measures for inspection rather than
+# decode blindly. See TA-withings-todo / wearables #56.
+SEGMENTAL_TYPES = {173, 174, 175}
+MEASTYPES = ",".join(str(t) for t in sorted(set(TYPE_MAP) | SEGMENTAL_TYPES))
 
 # ---- Part B: activity / sleep / workout endpoints (require user.activity scope) ----
 ACTIVITY_FIELDS = ("steps,distance,elevation,soft,moderate,intense,active,calories,"
@@ -403,6 +410,16 @@ def decode_group(grp):
             ev[name] = round(m["value"] * (10 ** m["unit"]), 3)
     if ev.get("weight") and ev.get("height"):
         ev["bmi"] = round(ev["weight"] / (ev["height"] ** 2), 1)
+    # DIAGNOSTIC (#56): if this group carries any segmental (6-zone) measure, stash the
+    # raw measures array so we can see how Withings tags each zone before writing the
+    # per-segment decode. One log line per segmental group (deduped by grpid upstream).
+    seg = [m for m in grp.get("measures", []) if m.get("type") in SEGMENTAL_TYPES]
+    if seg:
+        ev["_seg_raw"] = json.dumps(grp.get("measures", []), separators=(",", ":"))
+        ev["_seg_count"] = len(seg)
+        log_info("segmental measures present", grpid=grp.get("grpid"),
+                 modelid=grp.get("modelid"), seg_count=len(seg),
+                 seg_types=",".join(str(t) for t in sorted({m.get("type") for m in seg})))
     return ev
 
 
