@@ -50,7 +50,7 @@ import requests
 _LOG_COMPONENT = "withings"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.1.1"
+FETCHER_VERSION = "1.1.2"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -196,9 +196,8 @@ TYPE_MAP = {
 # scalar TYPE_MAP (which keeps one value per type). We REQUEST them and, until the raw
 # per-segment structure is confirmed, emit the raw measures for inspection rather than
 # decode blindly. See TA-withings-todo / wearables #56.
-SEGMENTAL_TYPES = {173, 174, 175}
+SEGMENTAL_TYPES = {173, 174, 175}   # per-zone: 173 fat-free, 174 fat, 175 muscle
 MEASTYPES = ",".join(str(t) for t in sorted(set(TYPE_MAP) | SEGMENTAL_TYPES))
-_SEG_SAMPLE_LOGGED = False   # diagnostic: log the raw segmental measures once per run
 
 # ---- Part B: activity / sleep / workout endpoints (require user.activity scope) ----
 ACTIVITY_FIELDS = ("steps,distance,elevation,soft,moderate,intense,active,calories,"
@@ -411,27 +410,42 @@ def decode_group(grp):
             ev[name] = round(m["value"] * (10 ** m["unit"]), 3)
     if ev.get("weight") and ev.get("height"):
         ev["bmi"] = round(ev["weight"] / (ev["height"] ** 2), 1)
-    # DIAGNOSTIC (#56): if this group carries any segmental (6-zone) measure, stash the
-    # raw measures array so we can see how Withings tags each zone before writing the
-    # per-segment decode. One log line per segmental group (deduped by grpid upstream).
-    seg = [m for m in grp.get("measures", []) if m.get("type") in SEGMENTAL_TYPES]
-    if seg:
-        ev["_seg_raw"] = json.dumps(grp.get("measures", []), separators=(",", ":"))
-        ev["_seg_count"] = len(seg)
-        # Log the raw segmental measures ONCE per run (logs flush regardless of event
-        # dedup) so we can read the exact per-zone tagging even when the group dedups.
-        global _SEG_SAMPLE_LOGGED
-        if not _SEG_SAMPLE_LOGGED:
-            _SEG_SAMPLE_LOGGED = True
-            # dump ALL measures for this one weigh-in: shows the per-zone tagging AND
-            # which scalar types are present (e.g. is PWV / type 91 actually here?).
-            log_info("segmental sample raw", grpid=grp.get("grpid"),
-                     all_types=",".join(str(t) for t in sorted({m.get("type") for m in grp.get("measures", [])})),
-                     measures_raw=json.dumps(grp.get("measures", []), separators=(",", ":")))
-        else:
-            log_info("segmental measures present", grpid=grp.get("grpid"),
-                     modelid=grp.get("modelid"), seg_count=len(seg))
     return ev
+
+
+# --- Segmental (6-zone) composition -> withings:segments (one event per zone) --------
+# Structure confirmed 2026-08-18 (Haley English + raw sample): each segmental measure
+# carries a `position` tagging its body zone, and the 5 zones partition the whole body
+# (their sum == the whole-body value). value_kg = value * 10^unit.
+#   types:     173 = fat-free mass, 174 = fat mass, 175 = muscle mass
+#   positions: 12 = trunk, 2/3 = arms, 10/11 = legs   (L/R tentative — confirm w/ Haley)
+SEGMENT_POSITION = {12: "trunk", 2: "arm_right", 3: "arm_left",
+                    10: "leg_right", 11: "leg_left"}
+_SEG_TYPE_FIELD = {173: "fat_free_mass_kg", 174: "fat_mass_kg", 175: "muscle_mass_kg"}
+
+
+def extract_segments(groups):
+    """Expand groups carrying segmental measures into one flat record per body zone."""
+    out = []
+    for grp in groups:
+        by_pos = {}
+        for m in grp.get("measures", []):
+            fld = _SEG_TYPE_FIELD.get(m.get("type"))
+            if fld is not None:
+                by_pos.setdefault(m.get("position"), {})[fld] = round(m["value"] * (10 ** m["unit"]), 3)
+        for pos, vals in by_pos.items():
+            rec = {"grpid": grp.get("grpid"), "deviceid": grp.get("deviceid"),
+                   "modelid": grp.get("modelid"), "_epoch": grp.get("date"),
+                   "day": datetime.datetime.utcfromtimestamp(grp.get("date", 0)).strftime("%Y-%m-%d"),
+                   "position": pos, "segment": SEGMENT_POSITION.get(pos, "pos_" + str(pos))}
+            rec.update(vals)
+            out.append(rec)
+    return out
+
+
+def decode_segment(rec):
+    """Segment records from extract_segments are already flat named-field events."""
+    return rec
 
 
 # ----------------------------------------------- activity / sleep / workout pulls
@@ -585,6 +599,8 @@ def run_sync(args):
     # prefix so keys never collide across datasets.
     datasets = [
         ("withings:body", groups, decode_group, lambda ev: str(ev.get("grpid"))),
+        ("withings:segments", extract_segments(groups), decode_segment,
+         lambda ev: "seg:%s:%s" % (ev.get("grpid"), ev.get("position"))),
         ("withings:activity", acts, decode_activity, lambda ev: "act:" + str(ev.get("day"))),
         ("withings:workouts", wks, decode_workout, lambda ev: "wk:" + str(ev.get("workout_id"))),
         ("withings:sleep", slps, decode_sleep, lambda ev: "sl:" + str(ev.get("startdate"))),
