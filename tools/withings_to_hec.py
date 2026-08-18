@@ -50,7 +50,7 @@ import requests
 _LOG_COMPONENT = "withings"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.1.0"
+FETCHER_VERSION = "1.1.1"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -198,6 +198,7 @@ TYPE_MAP = {
 # decode blindly. See TA-withings-todo / wearables #56.
 SEGMENTAL_TYPES = {173, 174, 175}
 MEASTYPES = ",".join(str(t) for t in sorted(set(TYPE_MAP) | SEGMENTAL_TYPES))
+_SEG_SAMPLE_LOGGED = False   # diagnostic: log the raw segmental measures once per run
 
 # ---- Part B: activity / sleep / workout endpoints (require user.activity scope) ----
 ACTIVITY_FIELDS = ("steps,distance,elevation,soft,moderate,intense,active,calories,"
@@ -417,9 +418,19 @@ def decode_group(grp):
     if seg:
         ev["_seg_raw"] = json.dumps(grp.get("measures", []), separators=(",", ":"))
         ev["_seg_count"] = len(seg)
-        log_info("segmental measures present", grpid=grp.get("grpid"),
-                 modelid=grp.get("modelid"), seg_count=len(seg),
-                 seg_types=",".join(str(t) for t in sorted({m.get("type") for m in seg})))
+        # Log the raw segmental measures ONCE per run (logs flush regardless of event
+        # dedup) so we can read the exact per-zone tagging even when the group dedups.
+        global _SEG_SAMPLE_LOGGED
+        if not _SEG_SAMPLE_LOGGED:
+            _SEG_SAMPLE_LOGGED = True
+            # dump ALL measures for this one weigh-in: shows the per-zone tagging AND
+            # which scalar types are present (e.g. is PWV / type 91 actually here?).
+            log_info("segmental sample raw", grpid=grp.get("grpid"),
+                     all_types=",".join(str(t) for t in sorted({m.get("type") for m in grp.get("measures", [])})),
+                     measures_raw=json.dumps(grp.get("measures", []), separators=(",", ":")))
+        else:
+            log_info("segmental measures present", grpid=grp.get("grpid"),
+                     modelid=grp.get("modelid"), seg_count=len(seg))
     return ev
 
 
