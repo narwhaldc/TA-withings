@@ -1,7 +1,7 @@
 # TA-withings → Splunk — Installation Guide
 
 Setup for the Withings data pipeline into the Wearables platform.
-**App version:** TA-withings `0.1.7` · **Ingest:** `tools/withings_to_hec.py` (Withings Measure API → HEC, OAuth2 pull)
+**App version:** TA-withings `0.1.8` · **Ingest:** `tools/withings_to_hec.py` (Withings Measure API → HEC, OAuth2 pull)
 
 ---
 

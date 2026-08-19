@@ -10,8 +10,11 @@ normalizes at search time. Four datasets / sourcetypes:
     withings:activity  — daily activity summary (getactivity) [scope user.activity]
     withings:workouts  — workout sessions (getworkouts)       [scope user.activity]
     withings:sleep     — nightly sleep summary (getsummary)   [scope user.activity]
-NOTE: adding the activity/sleep/workout datasets widened the OAuth SCOPE to
-include user.activity — existing installs must re-run --auth once to grant it.
+    withings:device    — device inventory + battery (getdevice) [scope user.info]
+    withings:segments  — 6-zone segmental composition (getmeas 173/174/175)
+NOTE: the OAuth SCOPE has widened over time (user.activity for activity/sleep/
+workouts; user.info for device inventory) — existing installs must re-run --auth
+once after an upgrade to grant the newly-added scopes.
 
 REPO-ONLY TOOLING — never shipped in the .spl (it holds credentials).
 
@@ -50,7 +53,7 @@ import requests
 _LOG_COMPONENT = "withings"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.1.2"
+FETCHER_VERSION = "1.1.3"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -169,9 +172,12 @@ TOKEN_URL = WBS + "/v2/oauth2"
 MEASURE_URL = WBS + "/measure"
 MEASURE_V2_URL = WBS + "/v2/measure"
 SLEEP_URL = WBS + "/v2/sleep"
-# body measurements are user.metrics; activity / sleep / workouts need user.activity.
-# Adding user.activity to an existing grant requires a one-time re-auth (--auth).
-SCOPE = "user.metrics,user.activity"
+USER_V2_URL = WBS + "/v2/user"          # getdevice (device inventory + battery)
+_RUN_EPOCH = int(time.time())           # observation time stamped on device-status events
+# body measurements are user.metrics; activity / sleep / workouts need user.activity;
+# device inventory (getdevice: battery, model, last-sync) needs user.info.
+# Widening the scope requires a one-time re-auth (--auth) on existing installs.
+SCOPE = "user.metrics,user.activity,user.info"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.getenv("WITHINGS_TOKEN_FILE", os.path.join(HERE, "withings_tokens.json"))
@@ -487,6 +493,36 @@ def get_sleep(token, lastupdate=None, startymd=None, endymd=None):
                   token, lastupdate, startymd, endymd, "series")
 
 
+def get_devices(token):
+    """Device inventory + status (getdevice, needs user.info scope). Not time-ranged
+    — returns the current snapshot. Fails soft: if the scope isn't granted yet, log a
+    warning and skip so the rest of the run still succeeds."""
+    try:
+        body = wbs_call(USER_V2_URL, {"action": "getdevice"}, bearer=token)
+        return body.get("devices", [])
+    except Exception as e:
+        log_warn("getdevice skipped (needs user.info scope? re-run --auth to grant)",
+                 error=type(e).__name__)
+        return []
+
+
+def decode_device(dev):
+    """One event per Withings device: model + battery (high/medium/low) + last-sync.
+    Stamped at observation time (_RUN_EPOCH) so battery/sync form a time series."""
+    return {
+        "deviceid": dev.get("deviceid"),
+        "device_type": dev.get("type"),
+        "model": dev.get("model"),
+        "model_id": dev.get("model_id"),
+        "battery": dev.get("battery"),                 # high / medium / low
+        "last_session_date": dev.get("last_session_date"),
+        "first_session_date": dev.get("first_session_date"),
+        "timezone": dev.get("timezone"),
+        "_epoch": _RUN_EPOCH,
+        "day": datetime.datetime.utcfromtimestamp(_RUN_EPOCH).strftime("%Y-%m-%d"),
+    }
+
+
 def _ymd_epoch(ymd):
     return int(datetime.datetime.strptime(ymd, "%Y-%m-%d")
                .replace(tzinfo=datetime.timezone.utc).timestamp())
@@ -594,6 +630,8 @@ def run_sync(args):
         wks = get_workouts(token, lastupdate=last)
         slps = get_sleep(token, lastupdate=last)
 
+    devices = get_devices(token)   # device inventory + battery (current snapshot, both modes)
+
     # (sourcetype, raw records, decoder, dedup-key builder). Body keeps its bare
     # grpid key for backward-compat with existing dedup stores; new types get a
     # prefix so keys never collide across datasets.
@@ -604,6 +642,8 @@ def run_sync(args):
         ("withings:activity", acts, decode_activity, lambda ev: "act:" + str(ev.get("day"))),
         ("withings:workouts", wks, decode_workout, lambda ev: "wk:" + str(ev.get("workout_id"))),
         ("withings:sleep", slps, decode_sleep, lambda ev: "sl:" + str(ev.get("startdate"))),
+        ("withings:device", devices, decode_device,
+         lambda ev: "dev:%s:%s:%s" % (ev.get("deviceid"), ev.get("battery"), ev.get("last_session_date"))),
     ]
 
     dedup = load_json(DEDUP_FILE, {})
