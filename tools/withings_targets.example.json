@@ -6,10 +6,11 @@
   },
   "targets": {
     "personal": {
-      "hec_url":    "https://splunk:8088/services/collector/event",
-      "hec_token":  "YOUR-HEC-TOKEN",
-      "index":      "wearables",
-      "person_id":  "P001",
+      "_comment_hec_url": "Splunk Cloud uses a DIFFERENT hostname than your search head, and the form depends on which cloud provider hosts your stack - a one-character difference that FAILS SILENTLY. AWS:  https://http-inputs-<host>.splunkcloud.com:443/services/collector/event  (HYPHEN after http-inputs). GCP:  https://http-inputs.<host>.splunkcloud.com:443/services/collector/event  (DOT after http-inputs). On-prem/self-managed is just your indexer or LB on port 8088, as shown below. Always the /event endpoint, never /raw. Get the exact URL from Splunk Web > Settings > Data Inputs > HTTP Event Collector.",
+      "hec_url": "https://splunk:8088/services/collector/event",
+      "hec_token": "YOUR-HEC-TOKEN",
+      "index": "wearables",
+      "person_id": "P001",
       "verify_ssl": false
     }
   }
