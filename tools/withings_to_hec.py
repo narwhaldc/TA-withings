@@ -53,7 +53,7 @@ import requests
 _LOG_COMPONENT = "withings"
 # Fetcher version — BUMP on every fetcher change (repo-only, not in the .spl);
 # emitted as fetcher_ver= on the post-sink "run started" line for drift tracking.
-FETCHER_VERSION = "1.1.3"
+FETCHER_VERSION = "1.2.0"
 # Box running this fetcher (its OWN hostname — not Splunk's HEC `host`). Sent as
 # run_host= on run-started so Ingest Health shows which box/person to nudge to upgrade.
 import socket
@@ -582,42 +582,39 @@ def hec_send(target, batch):
 
 
 # -------------------------------------------------------------------- main sync
-def run_sync(args):
-    targets = load_targets(args.target)
-    configure_hec_log(load_logging_cfg(), targets, args.dry_run)
-    if args.reset_dedup:
-        dedup = load_json(DEDUP_FILE, {})
-        if args.target:
-            for g in dedup.values():
-                g["sent_to"] = [t for t in g.get("sent_to", []) if t != args.target]
-            log_info("removed target from dedup", target=args.target)
-        else:
-            dedup = {}
-            log_info("cleared dedup store")
-        save_json(DEDUP_FILE, dedup)
-        return
+def sync(target_filter=None, backfill_date=None, backfill_end_date=None, dry_run=False):
+    """
+    Run one Withings fetch-and-send pass and return {"sent", "skipped", "targets"}.
 
-    if args.status:
-        cp = load_json(CHECKPOINT_FILE, {})
-        dedup = load_json(DEDUP_FILE, {})
-        print("checkpoint lastupdate: %s" % cp.get("lastupdate"))
-        print("known measurement groups: %d" % len(dedup))
-        for name in targets:
-            n = sum(1 for g in dedup.values() if name in g.get("sent_to", []))
-            print("  %s: %d groups sent" % (name, n))
-        return
+    Extracted out of the old run_sync(args) so a future master orchestrator
+    (or an embedded-interpreter mobile build) can call this directly
+    in-process for one vendor among several, with plain parameters instead
+    of an argparse Namespace. main() still does argparse, --auth,
+    --status/--reset-dedup handling, and the single-instance file lock; this
+    assumes all of that already happened.
+    """
+    targets = load_targets(target_filter)
+    configure_hec_log(load_logging_cfg(), targets, dry_run)
 
     token = access_token()
     t0 = time.time()
-    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, mode=("backfill" if args.backfill else "incremental"), targets=len(targets))
+    log_info("run started", fetcher_ver=FETCHER_VERSION, run_host=RUN_HOST, mode=("backfill" if backfill_date else "incremental"),
+             backfill_end=backfill_end_date, targets=len(targets))
     now = int(time.time())
     today_ymd = datetime.datetime.utcfromtimestamp(now).strftime("%Y-%m-%d")
-    if args.backfill:
-        start = int(datetime.datetime.strptime(args.backfill, "%Y-%m-%d").timestamp())
-        groups = getmeas(token, startdate=start, enddate=now)
-        acts = get_activity(token, startymd=args.backfill, endymd=today_ymd)
-        wks = get_workouts(token, startymd=args.backfill, endymd=today_ymd)
-        slps = get_sleep(token, startymd=args.backfill, endymd=today_ymd)
+    if backfill_date:
+        start = int(datetime.datetime.strptime(backfill_date, "%Y-%m-%d").timestamp())
+        # A bounded end (backfill_end_date) stays within its own range; an open-ended
+        # backfill still reaches through now/today exactly as before. Withings' lastupdate
+        # checkpoint below is a POLLING WATERMARK ("updated since X"), not a day-coverage
+        # marker like Garmin's — it's correct to advance it to now-at-run-time regardless
+        # of what historical range this backfill covered, so it needs no bounding fix.
+        end = int(datetime.datetime.strptime(backfill_end_date, "%Y-%m-%d").timestamp()) if backfill_end_date else now
+        end_ymd = backfill_end_date if backfill_end_date else today_ymd
+        groups = getmeas(token, startdate=start, enddate=end)
+        acts = get_activity(token, startymd=backfill_date, endymd=end_ymd)
+        wks = get_workouts(token, startymd=backfill_date, endymd=end_ymd)
+        slps = get_sleep(token, startymd=backfill_date, endymd=end_ymd)
     else:
         cp = load_json(CHECKPOINT_FILE, {})
         last = cp.get("lastupdate")
@@ -664,7 +661,7 @@ def run_sync(args):
             skipped_total += skipped
             if not batch:
                 continue
-            if args.dry_run:
+            if dry_run:
                 log_info("dry-run batch", person_id=tcfg.get("person_id"), target=name, sourcetype=sourcetype, count=len(batch), skipped=skipped)
                 for _, e in batch[:2]:
                     print("    " + json.dumps(e["event"]))
@@ -675,17 +672,22 @@ def run_sync(args):
                 log_info("sent events", person_id=tcfg.get("person_id"), target=name, sourcetype=sourcetype, count=len(batch), skipped=skipped)
             sent_total += len(batch)
 
-    if not args.dry_run:
+    if not dry_run:
         save_json(DEDUP_FILE, dedup)
         save_json(CHECKPOINT_FILE, {"lastupdate": int(time.time())})
     log_info("run complete", events=sent_total, skipped=skipped_total, targets=len(targets),
-             duration_s=round(time.time() - t0, 1), dry_run=args.dry_run)
+             duration_s=round(time.time() - t0, 1), dry_run=dry_run)
+    flush_hec_log()
+    return {"sent": sent_total, "skipped": skipped_total, "targets": len(targets)}
 
 
 def main():
     ap = argparse.ArgumentParser(description="Withings -> Splunk HEC (body composition).")
     ap.add_argument("--auth", action="store_true", help="run the one-time OAuth2 browser flow")
     ap.add_argument("--backfill", metavar="YYYY-MM-DD", help="pull history from this date")
+    ap.add_argument("--backfill-end", metavar="YYYY-MM-DD",
+                     help="bound a backfill to end on this date (inclusive) instead of today. "
+                          "Only meaningful with --backfill.")
     ap.add_argument("--dry-run", action="store_true", help="print events, send nothing")
     ap.add_argument("--status", action="store_true", help="checkpoint + per-target coverage")
     ap.add_argument("--reset-dedup", action="store_true", help="clear dedup (all, or one --target)")
@@ -694,6 +696,32 @@ def main():
 
     if args.auth:
         do_auth()
+        return
+
+    # -- Informational / maintenance exits (no lock needed — read-only or a
+    #    single dedup-file rewrite, not a real fetch-and-send run) -----------
+    if args.reset_dedup:
+        targets = load_targets(args.target)
+        dedup = load_json(DEDUP_FILE, {})
+        if args.target:
+            for g in dedup.values():
+                g["sent_to"] = [t for t in g.get("sent_to", []) if t != args.target]
+            log_info("removed target from dedup", target=args.target)
+        else:
+            dedup = {}
+            log_info("cleared dedup store")
+        save_json(DEDUP_FILE, dedup)
+        return
+
+    if args.status:
+        targets = load_targets(args.target)
+        cp = load_json(CHECKPOINT_FILE, {})
+        dedup = load_json(DEDUP_FILE, {})
+        print("checkpoint lastupdate: %s" % cp.get("lastupdate"))
+        print("known measurement groups: %d" % len(dedup))
+        for name in targets:
+            n = sum(1 for g in dedup.values() if name in g.get("sent_to", []))
+            print("  %s: %d groups sent" % (name, n))
         return
 
     # exclusive lock: flock auto-releases on exit/crash; we also remove the lock
@@ -726,7 +754,8 @@ def main():
     signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
 
     try:
-        run_sync(args)
+        sync(target_filter=args.target, backfill_date=args.backfill, backfill_end_date=args.backfill_end,
+             dry_run=args.dry_run)
     except Exception as e:
         log_error("run failed", error=type(e).__name__, detail=str(e))
         sys.exit(1)
