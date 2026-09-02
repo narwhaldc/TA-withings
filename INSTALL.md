@@ -127,6 +127,7 @@ override with a custom friendly name.
 ```bash
 python3 withings_to_hec.py --dry-run                 # print events, send nothing
 python3 withings_to_hec.py --backfill 2020-01-01     # history -> HEC
+python3 withings_to_hec.py --backfill 2020-01-01 --backfill-end 2020-06-30   # bounded range
 python3 withings_to_hec.py                            # incremental (checkpoint - overlap .. now)
 python3 withings_to_hec.py --status                  # per-target coverage
 ```
